@@ -353,13 +353,13 @@ case "$1" in
             STATUS="OK"
             PROBLEMS=""
 
-            # 🔴 VALIDAR README
+            #VALIDAR README
             if [ ! -f "$dir/README.md" ] && [ ! -f "$dir/README.txt" ]; then
                 STATUS="FAIL"
                 PROBLEMS="$PROBLEMS,missing_readme"
             fi
 
-            # 🔴 VALIDAR SRC
+            #VALIDAR SRC
             if [ ! -d "$dir/src" ]; then
                 STATUS="FAIL"
                 PROBLEMS="$PROBLEMS,missing_src"
@@ -372,13 +372,13 @@ case "$1" in
                 fi
             fi
 
-            # 🔴 DETETAR PROIBIDOS
+            #DETETAR PROIBIDOS
             if find "$dir" -type d \( -name "node_modules" -o -name "dist" -o -name "build" \) | grep -q .; then
                 STATUS="FAIL"
                 PROBLEMS="$PROBLEMS,forbidden_dir"
             fi
 
-            # 🔴 BINÁRIOS
+            #BINÁRIOS
             for f in $(find "$dir" -type f)
             do
                 if ! grep -Iq . "$f"; then
@@ -388,7 +388,7 @@ case "$1" in
                 fi
             done
 
-            # 🔴 TAMANHO > 5MB
+            #TAMANHO > 5MB
             for f in $(find "$dir" -type f)
             do
                 SIZE=$(du -m "$f" | cut -f1)
@@ -399,7 +399,7 @@ case "$1" in
                 fi
             done
 
-            # 📊 MÉTRICAS
+            #MÉTRICAS
             NUM_SRC=$(find "$dir/src" -type f 2>/dev/null | wc -l)
             TOTAL_FILES=$(find "$dir" -type f | wc -l)
 
@@ -414,7 +414,7 @@ case "$1" in
             PROBLEMS=$(echo "$PROBLEMS" | sed 's/^,//')
 
             write_output "$UC;$TP;$ALUNO;$TIMESTAMP;$STATUS;$NUM_SRC;$TOTAL_FILES;$TOTAL_LINES;$PROBLEMS"
-            # 🔥 INTEGRAÇÃO COM TODO
+            #INTEGRAÇÃO COM TODO
             if [ "$STATUS" = "FAIL" ]; then
 
                 TITLE="Corrigir entrega $ALUNO $UC $TP ($PROBLEMS)"
@@ -477,7 +477,7 @@ case "$1" in
 
         TEMP=$(mktemp)
 
-        # 🔁 Reaproveitar lógica tipo check (simplificada)
+        #Reaproveitar lógica tipo check (simplificada)
         find "$REPO" -type d | while read dir
         do
             NAME=$(basename "$dir")
