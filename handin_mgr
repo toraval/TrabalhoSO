@@ -1,0 +1,559 @@
+#!/bin/sh
+
+STATE="$HOME/.handin_mgr"
+TODOS="$STATE/todos.csv"
+LOCKDIR="$STATE/locks"
+
+init_state() {
+    mkdir -p "$STATE"
+    mkdir -p "$STATE/runs"
+    mkdir -p "$LOCKDIR"
+}
+
+
+acquire_lock() {
+    LOCK="$LOCKDIR/main.lock"
+
+    while ! mkdir "$LOCK" 2>/dev/null
+    do
+        sleep 1
+    done
+}
+
+release_lock() {
+    rmdir "$LOCKDIR/main.lock"
+}
+
+error() {
+    echo "Erro: $1" >&2
+    exit 1
+}
+
+case "$1" in
+
+    todo-add)
+        init_state
+
+        shift
+        TITLE="$1"
+
+        if [ -z "$TITLE" ]; then
+            error "Falta o titulo"
+        fi
+
+        PRIO=3
+        DUE=""
+        TAGS=""
+
+        shift
+
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -p)
+                    PRIO="$2"
+                    shift 2
+                    ;;
+                -d)
+                    DUE="$2"
+                    shift 2
+                    ;;
+                -t)
+                    TAGS="$2"
+                    shift 2
+                    ;;
+                *)
+                    error "Opcao invalida"
+                    ;;
+            esac
+        done
+
+        if [ "$PRIO" -lt 1 ] || [ "$PRIO" -gt 5 ]; then
+            error "Prioridade invalida"
+        fi
+
+        if [ ! -f "$TODOS" ]; then
+            touch "$TODOS"
+        fi
+
+        LAST_ID=$(cut -d';' -f1 "$TODOS" | sort -n | tail -1)
+
+        if [ -z "$LAST_ID" ]; then
+            NEW_ID=1
+        else
+            NEW_ID=$((LAST_ID + 1))
+        fi
+
+        CREATED=$(date "+%Y-%m-%d %H:%M:%S")
+
+        acquire_lock
+
+	echo "$NEW_ID;OPEN;$PRIO;$DUE;$TAGS;$CREATED;;$TITLE" >> "$TODOS"
+
+	release_lock
+
+        echo "Tarefa criada com id $NEW_ID"
+        ;;
+
+
+	    todo-list)
+        init_state
+
+        SHOW_ALL=0
+        SORT=""
+        FILTER_TAG=""
+        MIN_PRIO=""
+
+        shift
+
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -a)
+                    SHOW_ALL=1
+                    shift
+                    ;;
+                -s)
+                    SORT="$2"
+                    shift 2
+                    ;;
+                -t)
+                    FILTER_TAG="$2"
+                    shift 2
+                    ;;
+                -p)
+                    MIN_PRIO="$2"
+                    shift 2
+                    ;;
+                *)
+                    error "Opcao invalida"
+                    ;;
+            esac
+        done
+
+        if [ -n "$MIN_PRIO" ]; then
+            if [ "$MIN_PRIO" -lt 1 ] || [ "$MIN_PRIO" -gt 5 ]; then
+                error "minPrio invalido"
+            fi
+        fi
+
+        if [ ! -f "$TODOS" ]; then
+            exit 0
+        fi
+
+        TEMP=$(mktemp)
+
+        cp "$TODOS" "$TEMP"
+
+        # Filtrar por estado
+        if [ "$SHOW_ALL" -eq 0 ]; then
+            grep ";OPEN;" "$TEMP" > "$TEMP.filtered"
+            mv "$TEMP.filtered" "$TEMP"
+        fi
+
+        # Filtrar por tag
+        if [ -n "$FILTER_TAG" ]; then
+            grep "$FILTER_TAG" "$TEMP" > "$TEMP.filtered"
+            mv "$TEMP.filtered" "$TEMP"
+        fi
+
+        # Filtrar por prioridade
+        if [ -n "$MIN_PRIO" ]; then
+            awk -F';' -v min="$MIN_PRIO" '$3 >= min' "$TEMP" > "$TEMP.filtered"
+            mv "$TEMP.filtered" "$TEMP"
+        fi
+
+        # Ordenação
+        case "$SORT" in
+            due)
+                sort -t';' -k4 "$TEMP" -o "$TEMP"
+                ;;
+            prio)
+                sort -t';' -k3 -nr "$TEMP" -o "$TEMP"
+                ;;
+            created)
+                sort -t';' -k6 "$TEMP" -o "$TEMP"
+                ;;
+            "")
+                ;;
+            *)
+                error "sort invalido"
+                ;;
+        esac
+
+        while IFS=';' read -r id status prio due tags created done title
+        do
+            echo "[$id] (P$prio) $due $status tags:$tags - $title"
+        done < "$TEMP"
+
+        rm -f "$TEMP"
+        ;;
+
+    todo-done)
+        init_state
+
+        ID="$2"
+
+        if [ -z "$ID" ]; then
+            error "Falta o id"
+        fi
+
+        if ! grep -q "^$ID;" "$TODOS"; then
+            error "ID inexistente"
+        fi
+
+        STATUS=$(grep "^$ID;" "$TODOS" | cut -d';' -f2)
+
+        if [ "$STATUS" = "DONE" ]; then
+            echo "Tarefa ja esta DONE"
+            exit 0
+        fi
+
+        NOW=$(date "+%Y-%m-%d %H:%M:%S")
+
+        awk -F';' -v id="$ID" -v now="$NOW" 'BEGIN{OFS=";"} 
+        {
+            if($1==id){
+                $2="DONE"
+                $7=now
+            }
+            print
+        }' "$TODOS" > "$TODOS.tmp"
+
+        acquire_lock
+
+	mv "$TODOS.tmp" "$TODOS"
+
+	release_lock
+
+        echo "Tarefa $ID marcada como DONE"
+        ;;
+
+    todo-search)
+        init_state
+
+        TEXT="$2"
+
+        if [ -z "$TEXT" ]; then
+            error "Falta texto de pesquisa"
+        fi
+
+        grep -i "$TEXT" "$TODOS" | \
+        while IFS=';' read -r id status prio due tags created done title
+        do
+            echo "[$id] (P$prio) $due $status tags:$tags - $title"
+        done
+        ;;
+
+    handin-ingest)
+        init_state
+
+        INBOX="$2"
+        REPO="$3"
+        MOVE=0
+
+        if [ -z "$INBOX" ] || [ -z "$REPO" ]; then
+            error "Faltam argumentos"
+        fi
+
+        if [ "$4" = "-m" ]; then
+            MOVE=1
+        fi
+
+        if [ ! -d "$INBOX" ]; then
+            error "Inbox inexistente"
+        fi
+
+        if [ ! -d "$REPO" ]; then
+            error "Repo inexistente"
+        fi
+
+        RUN_ID=$(date "+%Y-%m-%d_%H%M%S")
+        REPORT="$STATE/runs/ingest_$RUN_ID.txt"
+
+        for item in "$INBOX"/*
+        do
+            NAME=$(basename "$item")
+
+            # Validar nome
+            if ! echo "$NAME" | grep -Eq '^[a-zA-Z0-9]+_[a-zA-Z0-9]+_TP[0-9]+_[0-9]{12}'; then
+                echo "FAIL;$item;nome_invalido" >> "$REPORT"
+                continue
+            fi
+
+            # Extrair partes
+            ALUNO=$(echo "$NAME" | cut -d'_' -f1)
+            UC=$(echo "$NAME" | cut -d'_' -f2)
+            TP=$(echo "$NAME" | cut -d'_' -f3)
+            TIME=$(echo "$NAME" | cut -d'_' -f4)
+
+            DEST="$REPO/$UC/$TP/$ALUNO/$TIME"
+
+            mkdir -p "$DEST"
+
+            if [ "$MOVE" -eq 1 ]; then
+                mv "$item" "$DEST/" 2>/dev/null
+            else
+                cp -r "$item" "$DEST/" 2>/dev/null
+            fi
+
+            if [ $? -eq 0 ]; then
+                echo "OK;$item;$DEST" >> "$REPORT"
+            else
+                echo "FAIL;$item;erro_copia" >> "$REPORT"
+            fi
+
+        done
+
+        echo "Relatorio criado em: $REPORT"
+        ;;
+
+    handin-check)
+        init_state
+
+        REPO="$2"
+        OUTPUT="$3"
+
+        if [ -z "$REPO" ]; then
+            error "Falta repo_dir"
+        fi
+
+        if [ ! -d "$REPO" ]; then
+            error "Repo inexistente"
+        fi
+
+        if [ "$OUTPUT" = "-o" ]; then
+            OUTPUT="$4"
+        else
+            OUTPUT=""
+        fi
+
+        # Função para escrever output
+        write_output() {
+            if [ -n "$OUTPUT" ]; then
+                echo "$1" >> "$OUTPUT"
+            else
+                echo "$1"
+            fi
+        }
+
+        # Percorrer entregas
+        find "$REPO" -type d | while read dir
+        do
+            NAME=$(basename "$dir")
+
+            # validar timestamp (12 dígitos)
+            if ! echo "$NAME" | grep -Eq '^[0-9]{12}$'; then
+                continue
+            fi
+
+            TIMESTAMP="$NAME"
+            ALUNO=$(basename "$(dirname "$dir")")
+            TP=$(basename "$(dirname "$(dirname "$dir")")")
+            UC=$(basename "$(dirname "$(dirname "$(dirname "$dir")")")")
+
+            STATUS="OK"
+            PROBLEMS=""
+
+            # 🔴 VALIDAR README
+            if [ ! -f "$dir/README.md" ] && [ ! -f "$dir/README.txt" ]; then
+                STATUS="FAIL"
+                PROBLEMS="$PROBLEMS,missing_readme"
+            fi
+
+            # 🔴 VALIDAR SRC
+            if [ ! -d "$dir/src" ]; then
+                STATUS="FAIL"
+                PROBLEMS="$PROBLEMS,missing_src"
+            else
+                NUM_SRC=$(find "$dir/src" -type f | wc -l)
+
+                if [ "$NUM_SRC" -eq 0 ]; then
+                    STATUS="FAIL"
+                    PROBLEMS="$PROBLEMS,empty_src"
+                fi
+            fi
+
+            # 🔴 DETETAR PROIBIDOS
+            if find "$dir" -type d \( -name "node_modules" -o -name "dist" -o -name "build" \) | grep -q .; then
+                STATUS="FAIL"
+                PROBLEMS="$PROBLEMS,forbidden_dir"
+            fi
+
+            # 🔴 BINÁRIOS
+            for f in $(find "$dir" -type f)
+            do
+                if ! grep -Iq . "$f"; then
+                    STATUS="FAIL"
+                    PROBLEMS="$PROBLEMS,binary_found"
+                    break
+                fi
+            done
+
+            # 🔴 TAMANHO > 5MB
+            for f in $(find "$dir" -type f)
+            do
+                SIZE=$(du -m "$f" | cut -f1)
+                if [ "$SIZE" -gt 5 ]; then
+                    STATUS="FAIL"
+                    PROBLEMS="$PROBLEMS,too_large"
+                    break
+                fi
+            done
+
+            # 📊 MÉTRICAS
+            NUM_SRC=$(find "$dir/src" -type f 2>/dev/null | wc -l)
+            TOTAL_FILES=$(find "$dir" -type f | wc -l)
+
+            TOTAL_LINES=0
+            for f in $(find "$dir/src" -type f 2>/dev/null)
+            do
+                LINES=$(wc -l < "$f")
+                TOTAL_LINES=$((TOTAL_LINES + LINES))
+            done
+
+            # limpar vírgula inicial
+            PROBLEMS=$(echo "$PROBLEMS" | sed 's/^,//')
+
+            write_output "$UC;$TP;$ALUNO;$TIMESTAMP;$STATUS;$NUM_SRC;$TOTAL_FILES;$TOTAL_LINES;$PROBLEMS"
+            # 🔥 INTEGRAÇÃO COM TODO
+            if [ "$STATUS" = "FAIL" ]; then
+
+                TITLE="Corrigir entrega $ALUNO $UC $TP ($PROBLEMS)"
+                TAGS="handin,$UC,$TP"
+
+                PRIO=4
+                if echo "$PROBLEMS" | grep -Eq "missing_src|binary_found"; then
+                    PRIO=5
+                fi
+
+                # evitar duplicados
+                if ! grep -q "$TITLE" "$TODOS" 2>/dev/null; then
+                    NOW=$(date "+%Y-%m-%d %H:%M:%S")
+
+                    LAST_ID=$(cut -d';' -f1 "$TODOS" 2>/dev/null | sort -n | tail -1)
+                    [ -z "$LAST_ID" ] && LAST_ID=0
+                    NEW_ID=$((LAST_ID + 1))
+
+                    acquire_lock
+                    echo "$NEW_ID;OPEN;$PRIO;;$TAGS;$NOW;;$TITLE" >> "$TODOS"
+                    release_lock
+                fi
+            fi
+
+        done
+        ;;
+
+    handin-summary)
+        init_state
+
+        REPO="$2"
+        FILTER_UC=""
+        FILTER_TP=""
+
+        shift 2
+
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -u)
+                    FILTER_UC="$2"
+                    shift 2
+                    ;;
+                -t)
+                    FILTER_TP="$2"
+                    shift 2
+                    ;;
+                *)
+                    error "Opcao invalida"
+                    ;;
+            esac
+        done
+
+        if [ -z "$REPO" ]; then
+            error "Falta repo_dir"
+        fi
+
+        if [ ! -d "$REPO" ]; then
+            error "Repo inexistente"
+        fi
+
+        TEMP=$(mktemp)
+
+        # 🔁 Reaproveitar lógica tipo check (simplificada)
+        find "$REPO" -type d | while read dir
+        do
+            NAME=$(basename "$dir")
+
+            if ! echo "$NAME" | grep -Eq '^[0-9]{12}$'; then
+                continue
+            fi
+
+            TIMESTAMP="$NAME"
+            ALUNO=$(basename "$(dirname "$dir")")
+            TP=$(basename "$(dirname "$(dirname "$dir")")")
+            UC=$(basename "$(dirname "$(dirname "$(dirname "$dir")")")")
+
+            # filtros
+            [ -n "$FILTER_UC" ] && [ "$UC" != "$FILTER_UC" ] && continue
+            [ -n "$FILTER_TP" ] && [ "$TP" != "$FILTER_TP" ] && continue
+
+            STATUS="OK"
+
+            if [ ! -f "$dir/README.md" ] && [ ! -f "$dir/README.txt" ]; then
+                STATUS="FAIL"
+            fi
+
+            if [ ! -d "$dir/src" ]; then
+                STATUS="FAIL"
+            fi
+
+            TOTAL_FILES=$(find "$dir" -type f | wc -l)
+
+            TOTAL_LINES=0
+            for f in $(find "$dir/src" -type f 2>/dev/null)
+            do
+                LINES=$(wc -l < "$f")
+                TOTAL_LINES=$((TOTAL_LINES + LINES))
+            done
+
+            echo "$UC;$TP;$ALUNO;$STATUS;$TOTAL_FILES;$TOTAL_LINES" >> "$TEMP"
+
+        done
+
+        TOTAL=$(wc -l < "$TEMP")
+        OK=$(grep ";OK;" "$TEMP" | wc -l)
+        FAIL=$(grep ";FAIL;" "$TEMP" | wc -l)
+
+        echo "===== RESUMO ====="
+        echo "Total entregas: $TOTAL"
+        echo "OK: $OK"
+        echo "FAIL: $FAIL"
+        echo ""
+
+        echo "===== TOP 5 FICHEIROS ====="
+        sort -t';' -k5 -nr "$TEMP" | head -5 | \
+        while IFS=';' read uc tp aluno status files lines
+        do
+            echo "$uc $tp $aluno - $files ficheiros"
+        done
+
+        echo ""
+
+        echo "===== TOP 5 LINHAS ====="
+        sort -t';' -k6 -nr "$TEMP" | head -5 | \
+        while IFS=';' read uc tp aluno status files lines
+        do
+            echo "$uc $tp $aluno - $lines linhas"
+        done
+
+        echo ""
+
+        echo "===== ALUNOS COM FAIL ====="
+        grep ";FAIL;" "$TEMP" | cut -d';' -f3 | sort | uniq
+
+        rm -f "$TEMP"
+        ;;
+
+    *)
+        echo "Comando desconhecido"
+        exit 1
+        ;;
+esac
